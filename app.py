@@ -356,8 +356,8 @@ def customer_login():
     # customer_data['token'] = generate_customer_token(customer.id) # Örnek
     return jsonify(customer_data), 200
 
-@app.route('/login', methods=['POST'])
-def login():
+@app.route('/admin/login', methods=['POST'])
+def admin_login():
     data = request.get_json()
     email = data.get('email')
     password = data.get('password')
@@ -365,47 +365,49 @@ def login():
     if not email or not password:
         return jsonify({"error": "Email and password are required"}), 400
 
-    # === YENİ ADIM 1: ADMIN GİRİŞİ KONTROLÜ ===
+    # Sadece ve sadece admin bilgileriyle karşılaştır.
     if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
         print("Admin girişi başarılı!")
         # Admin için özel bir "user" objesi oluşturalım.
-        # Bu obje, frontend'deki Reseller arayüzüne (interface) uymalıdır.
-        # Bu sayede frontend'de ekstra bir değişiklik yapmana gerek kalmaz.
+        # Bu obje, frontend'deki Reseller arayüzü ile uyumlu olmalıdır.
         admin_user_obj = {
-            'id': 0,  # Admin'in ID'si 0 olabilir (veritabanında olmadığı için)
+            'id': 0,
             'name': 'Sistem Yöneticisi',
             'email': ADMIN_EMAIL,
             'phone': 'N/A',
-            'customers': 0,  # Adminin doğrudan müşterisi olmadığı için 0
-            'cameras': 0,    # Adminin doğrudan kamerası olmadığı için 0
+            'customers': 0,
+            'cameras': 0,
             'status': 'Active',
-            'licenses': 9999, # Sınırsız lisans gibi gösterilebilir
+            'licenses': 9999,
             'remainingLicenses': 9999,
             'joinDate': datetime.now().strftime('%Y-%m-%d')
         }
         return jsonify(admin_user_obj), 200
+    else:
+        # Gelen bilgiler admin'e ait değilse, giriş başarısızdır.
+        print(f"Başarısız admin girişi denemesi: {email}")
+        return jsonify({"error": "Invalid admin credentials. Access denied."}), 401
 
-    # === MEVCUT ADIM 2: BAYİ GİRİŞİ KONTROLÜ (EĞER ADMİN DEĞİLSE) ===
-    # Eğer giriş yapan admin değilse, kodun geri kalanı eskisi gibi çalışır.
+# --- MEVCUT AUTH ENDPOINTS (Bayiler için - DOKUNMA) ---
+
+@app.route('/login', methods=['POST'])
+def login():
+    # BU FONKSİYON OLDUĞU GİBİ KALIYOR.
+    # BAYİLERİN GİRİŞİ İÇİN KULLANILMAYA DEVAM EDECEK.
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
+
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+
     reseller = Reseller.query.filter_by(email=email).first()
 
-    # ÖNEMLİ DÜZELTME: Şifreleri düz metin olarak karşılaştırma!
-    # Test bayisi oluştururken hash'lenmemiş şifre kullanmışsın. Bu çok güvensiz.
-    # Şifre kontrolünü werkzeug'un check_password_hash ile yapmalıyız.
-    # Bu yüzden Reseller modelinde şifreyi kaydederken generate_password_hash kullanmalısın.
-    # Şimdilik mevcut mantığını koruyorum ama düzeltilmesi şiddetle tavsiye edilir.
-
-    # Senin mevcut kodun (Düz metin karşılaştırması - Güvensiz!)
     if not reseller or reseller.password_hash != password:
         return jsonify({"error": "Invalid email or password"}), 401
     
-    # OLMASI GEREKEN GÜVENLİ YOL:
-    # if not reseller or not check_password_hash(reseller.password_hash, password):
-    #     return jsonify({"error": "Invalid email or password"}), 401
-
-    # Bayi pasifse giriş yapamasın
     if reseller.status != 'Active':
-        return jsonify({"error": "Hesabınız pasif. Lütfen yöneticinizle iletişime geçin."}), 403 # Forbidden
+        return jsonify({"error": "Hesabınız pasif. Lütfen yöneticinizle iletişime geçin."}), 403
 
     return jsonify(reseller.to_json()), 200
 
