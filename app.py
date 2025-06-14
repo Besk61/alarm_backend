@@ -572,6 +572,7 @@ def get_streams_for_yolo():
                 "customer_id": customer.id,
                 "customer_name": customer.name,
                 "camera_name": camera.name,
+                "additional_id": customer.additional_id, # <<<<<< YENİ EKLENDİ
                 "polygon": polygon_data, # Artık doğru formatta olmalı
                 "time_range": time_range_data,
                 "module_name": "YOLOv8_Person_Detection",
