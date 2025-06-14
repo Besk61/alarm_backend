@@ -16,11 +16,15 @@ import calendar # Aylık veriler için
 import json
 import cv2
 import base64
+import os
 
 app = Flask(__name__)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///alarm_merkezi.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@alarmmerkezi.com')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Alarm123!')
 
 db.init_app(app)
 
@@ -361,11 +365,44 @@ def login():
     if not email or not password:
         return jsonify({"error": "Email and password are required"}), 400
 
+    # === YENİ ADIM 1: ADMIN GİRİŞİ KONTROLÜ ===
+    if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+        print("Admin girişi başarılı!")
+        # Admin için özel bir "user" objesi oluşturalım.
+        # Bu obje, frontend'deki Reseller arayüzüne (interface) uymalıdır.
+        # Bu sayede frontend'de ekstra bir değişiklik yapmana gerek kalmaz.
+        admin_user_obj = {
+            'id': 0,  # Admin'in ID'si 0 olabilir (veritabanında olmadığı için)
+            'name': 'Sistem Yöneticisi',
+            'email': ADMIN_EMAIL,
+            'phone': 'N/A',
+            'customers': 0,  # Adminin doğrudan müşterisi olmadığı için 0
+            'cameras': 0,    # Adminin doğrudan kamerası olmadığı için 0
+            'status': 'Active',
+            'licenses': 9999, # Sınırsız lisans gibi gösterilebilir
+            'remainingLicenses': 9999,
+            'joinDate': datetime.now().strftime('%Y-%m-%d')
+        }
+        return jsonify(admin_user_obj), 200
+
+    # === MEVCUT ADIM 2: BAYİ GİRİŞİ KONTROLÜ (EĞER ADMİN DEĞİLSE) ===
+    # Eğer giriş yapan admin değilse, kodun geri kalanı eskisi gibi çalışır.
     reseller = Reseller.query.filter_by(email=email).first()
 
+    # ÖNEMLİ DÜZELTME: Şifreleri düz metin olarak karşılaştırma!
+    # Test bayisi oluştururken hash'lenmemiş şifre kullanmışsın. Bu çok güvensiz.
+    # Şifre kontrolünü werkzeug'un check_password_hash ile yapmalıyız.
+    # Bu yüzden Reseller modelinde şifreyi kaydederken generate_password_hash kullanmalısın.
+    # Şimdilik mevcut mantığını koruyorum ama düzeltilmesi şiddetle tavsiye edilir.
+
+    # Senin mevcut kodun (Düz metin karşılaştırması - Güvensiz!)
     if not reseller or reseller.password_hash != password:
         return jsonify({"error": "Invalid email or password"}), 401
     
+    # OLMASI GEREKEN GÜVENLİ YOL:
+    # if not reseller or not check_password_hash(reseller.password_hash, password):
+    #     return jsonify({"error": "Invalid email or password"}), 401
+
     # Bayi pasifse giriş yapamasın
     if reseller.status != 'Active':
         return jsonify({"error": "Hesabınız pasif. Lütfen yöneticinizle iletişime geçin."}), 403 # Forbidden
