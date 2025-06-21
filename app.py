@@ -1,6 +1,7 @@
 # --- START OF FILE app.py ---
 
-from flask import Flask, request, jsonify
+import uuid
+from flask import Flask, request, jsonify,send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from models import Alarm, db, Reseller, Customer, Camera, ApprovalRequest
@@ -8,7 +9,7 @@ from datetime import datetime
 from werkzeug.security import check_password_hash # Eklemeyi unutma
 from werkzeug.security import generate_password_hash # Eklemeyi unutma
 from sqlalchemy import func, extract
-
+from flask_migrate import Migrate # <<< BU SATIRI EKLE
 from sqlalchemy import func, extract, Date, cast
 from sqlalchemy.orm import aliased
 from collections import defaultdict
@@ -17,7 +18,14 @@ import json
 import cv2
 import base64
 import os
+import base64
+from PIL import Image
+from io import BytesIO
+from sqlalchemy.orm import joinedload
+from datetime import datetime, timedelta, timezone
+import pytz
 
+TR_TIMEZONE = pytz.timezone('Europe/Istanbul')
 app = Flask(__name__)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///alarm_merkezi.db'
@@ -25,6 +33,8 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@alarmmerkezi.com')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Alarm123!')
+
+migrate = Migrate(app, db) # <<< BU SATIRI EKLE
 
 db.init_app(app)
 
@@ -43,13 +53,81 @@ with app.app_context():
             phone='5551234567',
             status='Active',
             licenses=100,
-            join_date=datetime.now().strftime('%Y-%m-%d')
+            join_date=datetime.now(timezone.utc).strftime('%Y-%m-%d')
         )
         db.session.add(test_reseller)
         db.session.commit()
         print(f"Test Bayisi '{test_reseller.name}' başarıyla oluşturuldu.")
 
 # === API Endpoint'leri ===
+
+UPLOAD_FOLDER = "cdn_images"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+MAX_FILE_SIZE_KB = 100
+
+def compress_image(image: Image.Image, max_kb: int = 100) -> bytes:
+    """Verilen PIL Image nesnesini max_kb altına sıkıştırır ve bytes döner."""
+    quality = 95
+    buffer = BytesIO()
+
+    while True:
+        buffer.seek(0)
+        buffer.truncate()
+        image.save(buffer, format="JPEG", quality=quality)
+        size_kb = buffer.tell() / 1024
+
+        if size_kb <= max_kb or quality <= 10:
+            break
+        quality -= 5
+
+    return buffer.getvalue()
+
+@app.route("/upload", methods=["POST"])
+def upload_image():
+    data = request.json
+
+    if not data or "image" not in data:
+        return jsonify({"error": "Missing 'image' field"}), 400
+
+    try:
+        # base64 string'den Image nesnesi oluştur
+        base64_data = data["image"]
+        image_data = base64.b64decode(base64_data)
+        img = Image.open(BytesIO(image_data)).convert("RGB")
+
+        # Gerekirse yeniden boyutlandır
+        img.thumbnail((1024, 1024))  # max genişlik/yükseklik 1024 px
+
+        # Sıkıştır
+        compressed_bytes = compress_image(img, MAX_FILE_SIZE_KB)
+
+        # Benzersiz dosya adı ve kayıt
+        filename = f"{uuid.uuid4().hex}.jpg"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+
+        with open(filepath, "wb") as f:
+            f.write(compressed_bytes)
+
+        # Tam dosya yolu
+        absolute_path = os.path.abspath(filepath)
+
+        return jsonify({
+            "message": "Image uploaded successfully",
+            "filename": filename,
+            "url": f"/cdn/{filename}",
+            "full_path": absolute_path
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/cdn/<path:filename>')
+def serve_cdn_image(filename):
+    try:
+        return send_from_directory(UPLOAD_FOLDER, filename)
+    except FileNotFoundError:
+        return jsonify({"error": "File not found"}), 404
 
 @app.route('/dashboard/stats/hourly-detections', methods=['GET'])
 def get_hourly_detections():
@@ -234,17 +312,93 @@ def get_monthly_detections():
 
 
 # Müşterinin kendi alarmlarını listelemesi için
+# app.route('/customers/<int:customer_id>/alarms', methods=['GET'])
+# def get_customer_alarms_list(customer_id):
+#     # Yetkilendirme kontrolü
+#     customer = Customer.query.get(customer_id)
+#     if not customer:
+#         return jsonify({"error": "Müşteri bulunamadı"}), 404
+
+#     # Sayfalama ve filtreleme parametrelerini al
+#     page = request.args.get('page', 1, type=int)
+#     camera_id_filter = request.args.get('cameraId', None, type=int)
+#     PER_PAGE = 25 # Sayfa başına alarm sayısı
+
+#     # Temel sorguyu oluştur
+#     query = Alarm.query.filter_by(customer_id=customer_id)
+
+#     # Kamera ID'sine göre filtrele (eğer parametre verilmişse)
+#     if camera_id_filter:
+#         query = query.filter_by(camera_id=camera_id_filter)
+#         # Kamera var mı diye kontrol edilebilir
+#         # camera_exists = Camera.query.filter_by(id=camera_id_filter, customer_id=customer_id).first()
+#         # if not camera_exists:
+#         #     return jsonify({"error": "Belirtilen kamera bu müşteriye ait değil veya bulunamadı"}), 404
+    
+#     # Sonuca göre sırala ve sayfala
+#     query = query.order_by(Alarm.timestamp.desc())
+    
+#     # paginate() metodu, sayfalama objesi döndürür
+#     paginated_alarms = query.paginate(page=page, per_page=PER_PAGE, error_out=False)
+    
+#     # Mevcut sayfadaki alarmları al
+#     alarms_on_page = paginated_alarms.items
+    
+#     # Frontend için zengin bir yanıt oluştur
+#     return jsonify({
+#         'alarms': [alarm.to_json() for alarm in alarms_on_page],
+#         'pagination': {
+#             'currentPage': paginated_alarms.page,
+#             'totalPages': paginated_alarms.pages,
+#             'totalItems': paginated_alarms.total,
+#             'hasNext': paginated_alarms.has_next,
+#             'hasPrev': paginated_alarms.has_prev
+#         }
+#     }), 200
+
 @app.route('/customers/<int:customer_id>/alarms', methods=['GET'])
-def get_customer_alarms_list(customer_id):
-    # Yetkilendirme: Giriş yapan müşteri sadece kendi alarmlarını görmeli
-    # Bu kontrolü bir decorator veya token ile yapmak daha iyi olur.
+def get_customer_alarms(customer_id):
+    # Yetkilendirme kontrolü (örneğin, giriş yapan kullanıcının bu müşteri olup olmadığını kontrol et)
+    # Bu kısmı JWT veya session token ile daha güvenli hale getirebilirsin.
+    # Şimdilik, sadece müşteri var mı diye kontrol edelim.
     customer = Customer.query.get(customer_id)
     if not customer:
         return jsonify({"error": "Müşteri bulunamadı"}), 404
+
+    # Sayfalama ve filtreleme parametrelerini al
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 25, type=int) # Sayfa başına alarm sayısı
+    camera_id_filter = request.args.get('cameraId', type=int)
+
+    # Temel sorguyu oluştur
+    query = Alarm.query.filter_by(customer_id=customer_id)
+
+    # Kamera ID'sine göre filtrele (eğer parametre verilmişse)
+    if camera_id_filter:
+        query = query.filter_by(camera_id=camera_id_filter)
+        # Kamera var mı diye kontrol edilebilir
+        camera_exists = Camera.query.filter_by(id=camera_id_filter, customer_id=customer_id).first()
+        if not camera_exists:
+            return jsonify({"error": "Belirtilen kamera bu müşteriye ait değil veya bulunamadı"}), 404
     
-    # Filtreleme ve sayfalama parametreleri eklenebilir (request.args)
-    alarms = Alarm.query.filter_by(customer_id=customer_id).order_by(Alarm.timestamp.desc()).all()
-    return jsonify([alarm.to_json() for alarm in alarms]), 200
+    # Sonuca göre sırala ve sayfala
+    query = query.order_by(Alarm.timestamp.desc())
+    
+    paginated_alarms = query.paginate(page=page, per_page=per_page, error_out=False)
+    
+    alarms_on_page = paginated_alarms.items
+    
+    # Frontend'in beklediği zengin yanıtı oluştur
+    return jsonify({
+        'alarms': [alarm.to_json() for alarm in alarms_on_page],
+        'pagination': {
+            'currentPage': paginated_alarms.page,
+            'totalPages': paginated_alarms.pages,
+            'totalItems': paginated_alarms.total,
+            'hasNext': paginated_alarms.has_next,
+            'hasPrev': paginated_alarms.has_prev
+        }
+    }), 200
 
 # Bayinin, müşterilerinin alarmlarını listelemesi için (opsiyonel, dashboard için gerekebilir)
 @app.route('/resellers/<int:reseller_id>/alarms', methods=['GET'])
@@ -380,7 +534,7 @@ def admin_login():
             'status': 'Active',
             'licenses': 9999,
             'remainingLicenses': 9999,
-            'joinDate': datetime.now().strftime('%Y-%m-%d')
+            'joinDate': datetime.now(timezone.utc).strftime('%Y-%m-%d')
         }
         return jsonify(admin_user_obj), 200
     else:
@@ -437,7 +591,7 @@ def add_reseller():
             phone=data.get('phone', ''),
             licenses=data['licenses'],
             status=data.get('status', 'Active'),
-            join_date=data.get('joinDate', datetime.now().strftime('%Y-%m-%d'))
+            join_date=data.get('joinDate', datetime.now(timezone.utc).strftime('%Y-%m-%d'))
         )
         db.session.add(new_reseller)
         db.session.commit()
@@ -574,6 +728,7 @@ def get_streams_for_yolo():
                 "camera_name": camera.name,
                 "additional_id": customer.additional_id, # <<<<<< YENİ EKLENDİ
                 "polygon": polygon_data, # Artık doğru formatta olmalı
+                "cooldown": customer.cooldown, # <<< YENİ: Müşterinin cooldown süresini ekle
                 "time_range": time_range_data,
                 "module_name": "YOLOv8_Person_Detection",
                 "alarm_type": "İnsan Tespiti"
@@ -662,7 +817,8 @@ def create_installation_request():
     if not data:
         return jsonify({"error": "Veri gönderilmedi"}), 400
 
-    # 'customerSirenIpAddress' ve 'customerAdditionalId' artık opsiyonel
+    # Gerekli alanların kontrolü
+    # Not: address ve alarmCenterIp zorunlu değil, bu yüzden kontrol listesine eklemiyoruz.
     required_fields = ['fullName', 'email', 'nationalId', 'rtspStreams', 'resellerId', 'licenseExpiry']
     for field in required_fields:
         if field not in data or not data[field]:
@@ -672,7 +828,6 @@ def create_installation_request():
     if not reseller:
         return jsonify({"error": "Belirtilen bayi bulunamadı"}), 404
     
-    # E-posta veya TC Kimlik Numarası zaten mevcut bir müşteri veya beklemedeki talepte var mı kontrol et
     if Customer.query.filter_by(email=data['email']).first() or \
        ApprovalRequest.query.filter_by(customer_email=data['email'], status='Pending').first():
         return jsonify({"error": "Bu e-posta adresi zaten kayıtlı veya beklemede."}), 409
@@ -680,15 +835,10 @@ def create_installation_request():
        ApprovalRequest.query.filter_by(customer_national_id=data['nationalId'], status='Pending').first():
         return jsonify({"error": "Bu TC Kimlik Numarası zaten kayıtlı veya beklemede."}), 409
 
-    # RTSP URL'lerinin de benzersizliğini kontrol et (hem mevcut kameralar hem de beklemedeki talepler içinde)
     for rtsp_url in data.get('rtspStreams', []):
         if Camera.query.filter_by(rtsp_url=rtsp_url).first():
             return jsonify({"error": f"RTSP URL '{rtsp_url}' zaten bir kamera tarafından kullanılıyor."}), 409
-        # Not: ApprovalRequest'teki rtsp_urls bir liste olduğu için her birini kontrol etmek daha karmaşıktır.
-        # Basitlik adına, sadece Customer/Camera tablosundaki benzersizliği kontrol edelim.
-
-    # Lisans kontrolü: Talep anında da lisans yetersizse bildirebiliriz.
-    # Ancak asıl kontrol, onaylama aşamasında yapılacaktır.
+        
     requested_camera_count = len(data.get('rtspStreams', []))
     if reseller.remaining_licenses < requested_camera_count:
         return jsonify({
@@ -703,11 +853,15 @@ def create_installation_request():
             customer_phone=data.get('phone', ''),
             customer_national_id=data['nationalId'],
             customer_license_expiry=data['licenseExpiry'],
-            customer_siren_ip_address=data.get('sirenIpAddress'), # Yeni eklendi
-            customer_additional_id=data.get('additionalId'),     # Yeni eklendi
+            customer_siren_ip_address=data.get('sirenIpAddress'),
+            customer_additional_id=data.get('additionalId'),
+            # <<< YENİ ALANLARI BURADA ALIYORUZ >>>
+            customer_address=data.get('address'),
+            customer_alarm_center_ip=data.get('alarmCenterIp'),
+            # <<< --- >>>
             rtsp_urls=data['rtspStreams'],
             status='Pending',
-            request_date=datetime.now().strftime('%Y-%m-%d')
+            request_date=datetime.now(timezone.utc).strftime('%Y-%m-%d')
         )
         db.session.add(new_request)
         db.session.commit()
@@ -743,20 +897,19 @@ def approve_installation_request(request_id):
     # Onay anında lisans kontrolü
     requested_camera_count = len(approval_request.rtsp_urls)
     if reseller.remaining_licenses < requested_camera_count:
-        # Lisans yetersizse, talebi otomatik olarak reddet
         approval_request.status = 'Rejected'
-        approval_request.approval_date = datetime.now().strftime('%Y-%m-%d')
+        approval_request.approval_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         db.session.commit()
         return jsonify({
             "error": f"Bayi '{reseller.name}' için yeterli lisans yok. Talep reddedildi.",
             "details": f"{requested_camera_count} kamera için lisans talep edildi, bayinin kalan lisansı: {reseller.remaining_licenses}"
         }), 400
     
-    # Müşteri Email veya TC No zaten mevcut mu kontrol et (kesinleşmiş müşteriler arasında)
+    # Müşteri Email veya TC No zaten mevcut mu kontrol et
     if Customer.query.filter_by(email=approval_request.customer_email).first() or \
        Customer.query.filter_by(national_id=approval_request.customer_national_id).first():
-        approval_request.status = 'Rejected' # Çakışma durumunda reddet
-        approval_request.approval_date = datetime.now().strftime('%Y-%m-%d')
+        approval_request.status = 'Rejected'
+        approval_request.approval_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         db.session.commit()
         return jsonify({"error": "Bu e-posta veya TC Kimlik Numarası zaten kayıtlı bir müşteriye ait. Talep reddedildi."}), 409
 
@@ -769,29 +922,30 @@ def approve_installation_request(request_id):
             national_id=approval_request.customer_national_id,
             registration_date=approval_request.request_date,
             license_expiry=approval_request.customer_license_expiry,
-            siren_ip_address=approval_request.customer_siren_ip_address, # Yeni eklendi
-            additional_id=approval_request.customer_additional_id,     # Yeni eklendi
+            siren_ip_address=approval_request.customer_siren_ip_address,
+            additional_id=approval_request.customer_additional_id,
+            address=approval_request.customer_address, # << YENİ ALAN
+            alarm_center_ip=approval_request.customer_alarm_center_ip, # << YENİ ALAN
             reseller_id=approval_request.reseller_id,
             status='Active'
         )
         db.session.add(new_customer)
-        db.session.flush() # new_customer.id'yi almak için
+        db.session.flush()
 
         # Kameraları ekle
-        for rtsp_url in approval_request.rtsp_urls:
-            if Camera.query.filter_by(rtsp_url=rtsp_url).first(): # Tekrar benzersizlik kontrolü
+        for i, rtsp_url in enumerate(approval_request.rtsp_urls):
+            if Camera.query.filter_by(rtsp_url=rtsp_url).first():
                 raise Exception(f"RTSP URL '{rtsp_url}' zaten başka bir kamera tarafından kullanılıyor. Onay iptal edildi.")
             new_camera = Camera(
-                name=f"Kamera {len(new_customer.cameras_rel.all()) + 1}",
+                name=f"Kamera {i + 1}",
                 rtsp_url=rtsp_url,
-                # siren_ip_address artık burada yok
                 customer_id=new_customer.id
             )
             db.session.add(new_camera)
         
         # Talep durumunu güncelle
         approval_request.status = 'Approved'
-        approval_request.approval_date = datetime.now().strftime('%Y-%m-%d')
+        approval_request.approval_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
         db.session.commit()
         return jsonify({"message": "Kurulum talebi başarıyla onaylandı ve müşteri oluşturuldu.", "customer": new_customer.to_json()}), 200
@@ -811,7 +965,7 @@ def reject_installation_request(request_id):
 
     try:
         approval_request.status = 'Rejected'
-        approval_request.approval_date = datetime.now().strftime('%Y-%m-%d')
+        approval_request.approval_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         db.session.commit()
         return jsonify({"message": "Kurulum talebi başarıyla reddedildi."}), 200
     except Exception as e:
@@ -821,31 +975,203 @@ def reject_installation_request(request_id):
 
 # --- CUSTOMER ENDPOINTS (Önceki haliyle korunuyor, sadece GET/PUT/DELETE) ---
 
+@app.route('/alarms', methods=['GET'])
+def get_all_alarms():
+    # Sayfalama ve filtreleme parametrelerini al
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    search = request.args.get('search', type=str)
+    reseller_id = request.args.get('resellerId', type=int)
+    customer_id = request.args.get('customerId', type=int)
+    start_date_str = request.args.get('startDate', type=str)
+    end_date_str = request.args.get('endDate', type=str)
+
+    # Temel sorgu. Performans için ilişkili tabloları önceden yüklüyoruz.
+    query = Alarm.query.options(
+        joinedload(Alarm.customer).joinedload(Customer.reseller),
+        joinedload(Alarm.camera)
+    )
+
+    # Bayi filtresi
+    if reseller_id:
+        # Customer tablosu üzerinden join yaparak filtreleme
+        query = query.join(Alarm.customer).filter(Customer.reseller_id == reseller_id)
+    
+    # Müşteri filtresi
+    if customer_id:
+        query = query.filter(Alarm.customer_id == customer_id)
+
+    # Tarih aralığı filtresi
+    if start_date_str:
+        try:
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+            query = query.filter(Alarm.timestamp >= start_date)
+        except ValueError:
+            return jsonify({"error": "Geçersiz başlangıç tarihi formatı. YYYY-MM-DD kullanın."}), 400
+    
+    if end_date_str:
+        try:
+            # Bitiş tarihini gün sonu olarak almak için
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+            query = query.filter(Alarm.timestamp <= end_date)
+        except ValueError:
+            return jsonify({"error": "Geçersiz bitiş tarihi formatı. YYYY-MM-DD kullanın."}), 400
+
+    # Arama filtresi
+    if search:
+        search_term = f"%{search}%"
+        # Müşteri ve Kamera adlarına göre de arama yapmak için join gerekiyor
+        query = query.join(Alarm.customer, isouter=True).join(Alarm.camera, isouter=True)
+        query = query.filter(
+            db.or_(
+                Alarm.alarm_type.ilike(search_term),
+                Alarm.category.ilike(search_term),
+                Alarm.module_name.ilike(search_term),
+                Customer.name.ilike(search_term),
+                Camera.name.ilike(search_term)
+            )
+        )
+
+    # Sonuca göre sırala ve sayfala
+    query = query.order_by(Alarm.timestamp.desc())
+    
+    paginated_alarms = query.paginate(page=page, per_page=per_page, error_out=False)
+    
+    alarms_on_page = paginated_alarms.items
+    
+    return jsonify({
+        'alarms': [alarm.to_json() for alarm in alarms_on_page],
+        'pagination': {
+            'currentPage': paginated_alarms.page,
+            'totalPages': paginated_alarms.pages,
+            'totalItems': paginated_alarms.total,
+            'hasNext': paginated_alarms.has_next,
+            'hasPrev': paginated_alarms.has_prev
+        }
+    }), 200
+
+@app.route('/customers', methods=['POST'])
+def add_customer():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Veri gönderilmedi"}), 400
+
+    # Frontend'den gelen zorunlu alanları kontrol et
+    required_fields = ['name', 'email', 'nationalId', 'resellerId', 'licenseExpiry']
+    for field in required_fields:
+        # resellerId 0 olamaz, geçerli bir bayi seçilmeli
+        if field == 'resellerId' and data.get(field) == 0:
+            return jsonify({"error": "Geçerli bir bayi seçilmelidir (resellerId)"}), 400
+        if field not in data or not data[field]:
+            return jsonify({"error": f"Eksik alan: {field}"}), 400
+
+    # E-posta ve TC Kimlik No'nun benzersizliğini kontrol et
+    if Customer.query.filter_by(email=data['email']).first():
+        return jsonify({"error": "Bu e-posta adresi zaten kayıtlı."}), 409
+    if Customer.query.filter_by(national_id=data['nationalId']).first():
+        return jsonify({"error": "Bu TC Kimlik Numarası zaten kayıtlı."}), 409
+
+    # Bayi var mı kontrol et
+    reseller = Reseller.query.get(data['resellerId'])
+    if not reseller:
+        return jsonify({"error": "Belirtilen bayi bulunamadı."}), 404
+        
+    # Yeni müşteri oluşturulurken lisans kontrolüne gerek yok, 
+    # çünkü henüz kamerası yok. Lisans kontrolü kamera eklenirken yapılır.
+
+    try:
+        new_customer = Customer(
+            name=data['name'],
+            email=data['email'],
+            phone=data.get('phone', ''),
+            national_id=data['nationalId'],
+            reseller_id=data['resellerId'],
+            license_expiry=data['licenseExpiry'],
+            notification_channels=','.join(data.get('notificationChannels', [])),
+            status=data.get('status', 'Active'),
+            registration_date=data.get('registrationDate', datetime.now(timezone.utc).strftime('%Y-%m-%d')),
+            siren_ip_address=data.get('sirenIpAddress'),
+            additional_id=data.get('additionalId'),
+            # YENİ ALANLARI EKLE
+            address=data.get('address'),
+            alarm_center_ip=data.get('alarmCenterIp')
+        )
+        db.session.add(new_customer)
+        db.session.commit()
+        return jsonify(new_customer.to_json()), 201 # 201 Created status kodu
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Müşteri eklenirken bir hata oluştu.", "details": str(e)}), 500
+
 @app.route('/customers', methods=['GET'])
 def get_customers():
     try:
+        # Filtre parametrelerini al (artık opsiyonel)
         reseller_id_filter = request.args.get('resellerId', type=int)
         search_term = request.args.get('search', type=str)
-
-        query = Customer.query
-
-        if reseller_id_filter:
-            query = query.filter_by(reseller_id=reseller_id_filter)
         
+        # 1. Onaylanmış Müşterileri Çekmek için temel sorgu
+        customer_query = Customer.query
+
+        # EĞER resellerId filtresi varsa, sorguya ekle
+        if reseller_id_filter:
+            customer_query = customer_query.filter_by(reseller_id=reseller_id_filter)
+
+        # Arama terimi filtresi varsa, sorguya ekle
         if search_term:
             search_ilike = f"%{search_term}%"
-            query = query.filter(
+            customer_query = customer_query.filter(
                 db.or_(
                     Customer.name.ilike(search_ilike),
                     Customer.email.ilike(search_ilike),
                     Customer.national_id.ilike(search_ilike),
-                    Customer.additional_id.ilike(search_ilike) # Yeni eklendi
+                    Customer.additional_id.ilike(search_ilike)
                 )
             )
         
-        customers = query.order_by(Customer.name).all()
-        return jsonify([customer.to_json() for customer in customers]), 200
+        active_customers = customer_query.order_by(Customer.name).all()
+        customer_list = [c.to_json() for c in active_customers]
+
+        # 2. Beklemedeki Onay Taleplerini Çek (Sadece arama yapılmıyorsa göster)
+        # Bu, arama mantığını basit tutar. Admin tüm bekleyenleri görmek için arama çubuğunu temizler.
+        if not search_term:
+            approval_requests_query = ApprovalRequest.query.filter_by(status='Pending')
+            
+            # EĞER resellerId filtresi varsa, onay taleplerine de uygula
+            if reseller_id_filter:
+                approval_requests_query = approval_requests_query.filter_by(reseller_id=reseller_id_filter)
+            
+            pending_requests = approval_requests_query.all()
+            
+            for req in pending_requests:
+                customer_list.append({
+                    'id': f"pending_{req.id}",
+                    'name': req.customer_name,
+                    'email': req.customer_email,
+                    'phone': req.customer_phone,
+                    'nationalId': req.customer_national_id,
+                    'registrationDate': req.request_date,
+                    'resellerId': req.reseller_id,
+                    'resellerName': req.reseller.name if req.reseller else None,
+                    'cameraCount': len(req.rtsp_urls),
+                    'notificationChannels': [],
+                    'licenseExpiry': req.customer_license_expiry,
+                    'isActive': False,
+                    'status': 'Pending', 
+                    'sirenIpAddress': req.customer_siren_ip_address, 
+                    'additionalId': req.customer_additional_id,
+                    'address': req.customer_address,
+                    'alarmCenterIp': req.customer_alarm_center_ip
+                })
+
+        # Son listeyi tarihe göre sırala
+        sorted_list = sorted(customer_list, key=lambda x: x.get('registrationDate', ''), reverse=True)
+
+        return jsonify(sorted_list), 200
+
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Müşteriler listelenirken bir hata oluştu.", "details": str(e)}), 500
 
 @app.route('/customers/<int:id>', methods=['GET'])
@@ -869,6 +1195,7 @@ def update_customer(id):
     if not customer:
         return jsonify({"error": "Güncellenecek müşteri bulunamadı"}), 404
 
+    # Benzersiz alanların kontrolü
     if 'email' in data and data['email'] != customer.email:
         if Customer.query.filter(Customer.id != id, Customer.email == data['email']).first():
             return jsonify({"error": "Bu e-posta adresi başka bir müşteriye ait."}), 409
@@ -879,19 +1206,34 @@ def update_customer(id):
             return jsonify({"error": "Bu TC Kimlik Numarası başka bir müşteriye ait."}), 409
         customer.national_id = data['nationalId']
     
-    # additionalId için benzersizlik kontrolü yapmıyoruz, isteğe bağlı
-    if 'additionalId' in data and data['additionalId'] != customer.additional_id:
-        # eğer additionalId benzersiz olması gerekiyorsa buraya kontrol eklenmeli
-        customer.additional_id = data['additionalId']
-
+    # Diğer alanların güncellenmesi
     customer.name = data.get('name', customer.name)
     customer.phone = data.get('phone', customer.phone)
     customer.notification_channels = ','.join(data.get('notificationChannels', customer.notification_channels.split(',') if customer.notification_channels else []))
     customer.license_expiry = data.get('licenseExpiry', customer.license_expiry)
     customer.status = data.get('status', customer.status)
     customer.registration_date = data.get('registrationDate', customer.registration_date)
-    customer.siren_ip_address = data.get('sirenIpAddress', customer.siren_ip_address) # Yeni eklendi
+    
+    # Yeni eklenen alanların güncellenmesi
+    customer.siren_ip_address = data.get('sirenIpAddress', customer.siren_ip_address)
+    customer.additional_id = data.get('additionalId', customer.additional_id)
+    customer.address = data.get('address', customer.address) 
+    customer.alarm_center_ip = data.get('alarmCenterIp', customer.alarm_center_ip) 
 
+    # <<< YENİ ALANIN GÜNCELLENMESİ >>>
+    # Frontend'den gelen 'cooldown' değerini al, gelmezse mevcut değeri koru.
+    if 'cooldown' in data:
+        try:
+            # Gelen değerin integer olduğundan emin olalım.
+            cooldown_value = int(data['cooldown'])
+            if cooldown_value >= 0: # Cooldown negatif olamaz
+                 customer.cooldown = cooldown_value
+            else:
+                return jsonify({"error": "Cooldown değeri negatif olamaz."}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": "Geçersiz cooldown değeri. Sayı olmalıdır."}), 400
+
+    # Bayi değişikliği kontrolü
     if 'resellerId' in data and data['resellerId'] != customer.reseller_id:
         new_reseller = Reseller.query.get(data['resellerId'])
         if not new_reseller:
@@ -1053,7 +1395,55 @@ def delete_camera(id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Kamera silinirken bir hata oluştu.", "details": str(e)}), 500
+        
 
+@app.route('/customers/<int:id>/toggle-presence', methods=['POST'])
+def toggle_customer_presence(id):
+    customer = db.session.get(Customer, id) # <-- Modern ve doğru kullanım
+    if not customer:
+        return jsonify({"error": "Müşteri bulunamadı"}), 404
+
+    # Yetkilendirme kontrolü eklenebilir (örn: Sadece giriş yapan müşteri kendi durumunu değiştirebilir)
+
+    now = datetime.now(timezone.utc)
+    
+    # Eğer "is_present" modu zaten aktifse (yani bitiş zamanı gelecekteyse),
+    # bu istek modu iptal etmek veya süreyi yeniden başlatmak anlamına gelir.
+    # Kullanıcı isteğine göre, biz burada hem iptal hem de yeniden başlatma butonu sunacağımız için
+    # isteğin ne istediğini body'den alalım.
+    data = request.get_json()
+    action = data.get('action', 'toggle') # 'activate' veya 'cancel'
+
+    try:
+        if action == 'cancel':
+            # Modu direk iptal et
+            customer.is_present_until = None
+            message = "Varlık modu iptal edildi."
+        
+        elif action == 'activate':
+            # Modu 15 dakikalığına etkinleştir veya süresini sıfırla
+            customer.is_present_until = now + timedelta(minutes=15)
+            message = "Varlık modu 15 dakikalığına etkinleştirildi."
+        
+        else: # Varsayılan 'toggle' davranışı
+            if customer.is_present:
+                 # Aktifse, pasif yap
+                customer.is_present_until = None
+                message = "Varlık modu iptal edildi."
+            else:
+                # Pasifse, 15 dakikalığına aktif yap
+                customer.is_present_until = now + timedelta(minutes=15)
+                message = "Varlık modu 15 dakikalığına etkinleştirildi."
+
+
+        db.session.commit()
+        
+        # Frontend'in state'i kolayca güncelleyebilmesi için güncel müşteri bilgisini dön.
+        return jsonify(customer.to_json()), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Durum güncellenirken bir hata oluştu.", "details": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

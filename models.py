@@ -1,42 +1,59 @@
-# --- START OF FILE models.py ---
+# --- START OF FILE models.py (GÜNCELLENMİŞ VE SON HALİ) ---
+
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
-import json # json modülünü içe aktar
+from datetime import datetime, timezone # Bu importlar modern kullanım için doğru
+import json
+import pytz # Zaman dilimi işlemleri için gerekli
+
+# Zaman dilimi nesnelerini tanımlıyoruz. Bu, kodun okunabilirliğini artırır.
+TR_TIMEZONE = pytz.timezone('Europe/Istanbul')
+UTC_TIMEZONE = pytz.utc
 
 db = SQLAlchemy()
-password_hash = db.Column(db.String(128), nullable=True) # Müşteri girişi için, başlangıçta null olabilir
 
 class Alarm(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     customer_id = db.Column(db.Integer, db.ForeignKey('customer.id'), nullable=False)
     camera_id = db.Column(db.Integer, db.ForeignKey('camera.id'), nullable=False)
     
-    alarm_type = db.Column(db.String(100), nullable=False) # Örn: 'Alan İhlali', 'İnsan Tespiti'
-    category = db.Column(db.String(50), default='Critical') # Frontend'deki gibi
-    event_details = db.Column(db.String(255)) # Frontend'deki 'event' (worker1 vs.)
-    module_name = db.Column(db.String(100)) # Frontend'deki 'module' (Alan_Kontrol vs.)
+    alarm_type = db.Column(db.String(100), nullable=False)
+    category = db.Column(db.String(50), default='Critical')
+    event_details = db.Column(db.String(255))
+    module_name = db.Column(db.String(100))
     
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    image_url = db.Column(db.String(255)) # Alarm anı görüntüsü URL'i
-    # video_clip_url = db.Column(db.String(255)) # Opsiyonel
+    # Varsayılan zaman damgası "aware" UTC olarak ayarlandı. Bu en iyi ve modern pratiktir.
+    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(UTC_TIMEZONE), nullable=False)
+    image_url = db.Column(db.String(255))
     
-    # İlişkiler (opsiyonel ama faydalı)
     customer = db.relationship('Customer', backref=db.backref('alarms', lazy='dynamic'))
     camera = db.relationship('Camera', backref=db.backref('alarms', lazy='dynamic'))
 
     def to_json(self):
+        # --- DEĞİŞİKLİK: Daha sağlam zaman dilimi çevirimi ---
+        # Veritabanından gelen 'naive' zamanı, önce 'aware' UTC zamanına çevirip
+        # sonra yerel saate dönüştürmek en doğru yöntemdir.
+        if not self.timestamp:
+            local_timestamp_str = None
+        else:
+            # 1. Veritabanından gelen naive datetime'ı UTC olarak "aware" yap.
+            utc_timestamp = UTC_TIMEZONE.localize(self.timestamp)
+            # 2. Türkiye saatine çevir.
+            tr_timestamp = utc_timestamp.astimezone(TR_TIMEZONE)
+            # 3. Frontend için formatla.
+            local_timestamp_str = tr_timestamp.strftime('%d.%m.%Y %H:%M:%S')
+
         return {
             'id': self.id,
             'customerId': self.customer_id,
             'customerName': self.customer.name if self.customer else None,
             'cameraId': self.camera_id,
             'cameraName': self.camera.name if self.camera else None,
-            'cameraIp': self.camera.rtsp_url if self.camera else None, # Frontend bunu 'cameraIp' olarak bekliyor
+            'cameraIp': self.camera.rtsp_url if self.camera else None,
             'alarmType': self.alarm_type,
             'category': self.category,
-            'event': self.event_details, # Frontend bunu 'event' olarak bekliyor
-            'module': self.module_name, # Frontend bunu 'module' olarak bekliyor
-            'datetime': self.timestamp.strftime('%d.%m.%Y %H:%M:%S') if self.timestamp else None,
+            'event': self.event_details,
+            'module': self.module_name,
+            'datetime': local_timestamp_str,
             'imageUrl': self.image_url
         }
 
@@ -46,12 +63,12 @@ class Reseller(db.Model):
     email = db.Column(db.String(120), nullable=False, unique=True)
     password_hash = db.Column(db.String(128), nullable=False)
     phone = db.Column(db.String(20))
-    status = db.Column(db.String(20), default='Active') # 'Active' veya 'Inactive'
-    licenses = db.Column(db.Integer, nullable=False, default=0) # Toplam lisans hakkı
-    join_date = db.Column(db.String(20))
+    status = db.Column(db.String(20), default='Active')
+    licenses = db.Column(db.Integer, nullable=False, default=0)
+    # Bu string olduğu için zaman dilimi etkilemez.
+    join_date = db.Column(db.String(20)) 
 
     customers_rel = db.relationship('Customer', backref='reseller', lazy='dynamic', cascade="all, delete-orphan")
-    # Yeni: Bayi için onay talepleri
     approval_requests_rel = db.relationship('ApprovalRequest', backref='reseller', lazy='dynamic', cascade="all, delete-orphan")
 
     @property
@@ -87,17 +104,23 @@ class Customer(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128), nullable=True) # BU SATIRIN OLDUĞUNDAN EMİN OLUN
+    password_hash = db.Column(db.String(128), nullable=True)
     phone = db.Column(db.String(20))
-    national_id = db.Column(db.String(11), unique=True, nullable=False) # TC No zorunlu
-    registration_date = db.Column(db.String(20), default=lambda: datetime.now().strftime('%Y-%m-%d')) # Müşterinin sisteme kayıt tarihi
-    notification_channels = db.Column(db.String(100)) # Örn: "Telegram,Mobile App" (virgülle ayrılmış)
-    license_expiry = db.Column(db.String(20), nullable=False) # Lisans bitiş tarihi (zorunlu)
-    status = db.Column(db.String(20), default='Active') # 'Active' veya 'Inactive'
+    national_id = db.Column(db.String(11), unique=True, nullable=False)
+    # String olduğu için sorun yok, default'u modern kullanıma uygun hale getirdik.
+    registration_date = db.Column(db.String(20), default=lambda: datetime.now(UTC_TIMEZONE).strftime('%Y-%m-%d'))
+    notification_channels = db.Column(db.String(100))
+    license_expiry = db.Column(db.String(20), nullable=False)
+    status = db.Column(db.String(20), default='Active')
     
-    # YENİ EKLENEN ALANLAR
-    siren_ip_address = db.Column(db.String(50), nullable=True) # Siren IP adresi müşteri bazına taşındı
-    additional_id = db.Column(db.String(100), nullable=True) # Ek kimlik alanı
+    siren_ip_address = db.Column(db.String(50), nullable=True)
+    additional_id = db.Column(db.String(100), nullable=True)
+    address = db.Column(db.Text, nullable=True) 
+    alarm_center_ip = db.Column(db.String(50), nullable=True)
+    cooldown = db.Column(db.Integer, nullable=False, default=60)
+    
+    # "Ben Buradayım" modunun bitiş zamanı. Veritabanında UTC olarak saklanır.
+    is_present_until = db.Column(db.DateTime, nullable=True, default=None)
 
     reseller_id = db.Column(db.Integer, db.ForeignKey('reseller.id'), nullable=False)
 
@@ -107,7 +130,27 @@ class Customer(db.Model):
     def camera_count(self):
         return self.cameras_rel.count()
 
+    @property
+    def is_present(self):
+        """Hesaplanan property. is_present_until'in geçerli olup olmadığını UTC'ye göre kontrol eder."""
+        # Eğer veritabanında tarih yoksa veya geçmişteyse, mod aktif değildir.
+        if not self.is_present_until:
+            return False
+        
+        # Veritabanından gelen naive zamanı "aware" yap ve karşılaştır.
+        # Bu kısımda değişiklik yok, burası zaten doğruydu.
+        db_time_aware = UTC_TIMEZONE.localize(self.is_present_until)
+        return db_time_aware > datetime.now(UTC_TIMEZONE)
+
+
     def to_json(self):
+        # --- İŞTE DÜZELTME BURADA ---
+        present_until_iso = None
+        # `self.is_present_until` None değilse localize işlemini yap.
+        if self.is_present_until:
+            aware_utc_time = UTC_TIMEZONE.localize(self.is_present_until)
+            present_until_iso = aware_utc_time.isoformat()
+            
         return {
             'id': self.id,
             'name': self.name,
@@ -121,17 +164,23 @@ class Customer(db.Model):
             'notificationChannels': self.notification_channels.split(',') if self.notification_channels else [],
             'licenseExpiry': self.license_expiry,
             'isActive': self.status == 'Active',
-            'sirenIpAddress': self.siren_ip_address, # JSON çıktısına ekle
-            'additionalId': self.additional_id # JSON çıktısına ekle
+            'sirenIpAddress': self.siren_ip_address, 
+            'additionalId': self.additional_id,
+            'address': self.address, 
+            'alarmCenterIp': self.alarm_center_ip,
+            'cooldown': self.cooldown,
+            # `self.is_present` çağrısı artık `None` durumu için güvende.
+            'is_present': self.is_present, 
+            # `present_until_iso` da `None` durumu için güvende.
+            'is_present_until': present_until_iso
         }
 
 class Camera(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=True) # Kameraya bir isim verilebilir (örn: "Giriş Kapısı")
-    rtsp_url = db.Column(db.String(255), nullable=False, unique=True) # RTSP URL'si benzersiz olmalı
-    roi_coordinates = db.Column(db.Text, nullable=True) # Alan tanımı için JSON string [[x,y], [x,y]]
-    analysis_time_range = db.Column(db.String(50), nullable=True) # "HH:MM-HH:MM" formatında
-    # siren_ip_address artık burada değil, Customer modeline taşındı.
+    name = db.Column(db.String(100), nullable=True)
+    rtsp_url = db.Column(db.String(255), nullable=False, unique=True)
+    roi_coordinates = db.Column(db.Text, nullable=True)
+    analysis_time_range = db.Column(db.String(50), nullable=True)
 
     customer_id = db.Column(db.Integer, db.ForeignKey('customer.id'), nullable=False)
 
@@ -140,7 +189,6 @@ class Camera(db.Model):
             'id': self.id,
             'name': self.name,
             'rtspUrl': self.rtsp_url,
-            # 'sirenIpAddress': self.siren_ip_address, # Artık JSON çıktısında yok
             'customerId': self.customer_id,
             'roiCoordinates': self.roi_coordinates,
             'analysisTimeRange': self.analysis_time_range
@@ -150,25 +198,24 @@ class ApprovalRequest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     reseller_id = db.Column(db.Integer, db.ForeignKey('reseller.id'), nullable=False)
     
-    # Müşteri Adayı Bilgileri
     customer_name = db.Column(db.String(100), nullable=False)
     customer_email = db.Column(db.String(120), nullable=False)
     customer_phone = db.Column(db.String(20))
     customer_national_id = db.Column(db.String(11), nullable=False)
-    customer_license_expiry = db.Column(db.String(20), nullable=False) # Müşteri lisans bitiş tarihi
+    customer_license_expiry = db.Column(db.String(20), nullable=False)
     
-    # YENİ EKLENEN ALANLAR (Talep aşamasında da bu bilgilerin tutulması için)
     customer_siren_ip_address = db.Column(db.String(50), nullable=True)
     customer_additional_id = db.Column(db.String(100), nullable=True)
+    customer_address = db.Column(db.Text, nullable=True) 
+    customer_alarm_center_ip = db.Column(db.String(50), nullable=True) 
 
-    # RTSP URL'lerini JSON string olarak saklayalım
     _rtsp_urls_json = db.Column(db.Text, nullable=False) 
     
-    status = db.Column(db.String(20), default='Pending') # 'Pending', 'Approved', 'Rejected'
-    request_date = db.Column(db.String(20), default=lambda: datetime.now().strftime('%Y-%m-%d'))
-    approval_date = db.Column(db.String(20)) # Onay/Reddetme tarihi, null olabilir
+    status = db.Column(db.String(20), default='Pending')
+    # String olduğu için sorun yok, default'u modern kullanıma uygun hale getirdik.
+    request_date = db.Column(db.String(20), default=lambda: datetime.now(UTC_TIMEZONE).strftime('%Y-%m-%d'))
+    approval_date = db.Column(db.String(20))
 
-    # rtsp_urls özelliğini tanımla
     @property
     def rtsp_urls(self):
         return json.loads(self._rtsp_urls_json) if self._rtsp_urls_json else []
@@ -187,11 +234,12 @@ class ApprovalRequest(db.Model):
             'customerPhone': self.customer_phone,
             'customerNationalId': self.customer_national_id,
             'customerLicenseExpiry': self.customer_license_expiry,
-            'customerSirenIpAddress': self.customer_siren_ip_address, # JSON çıktısına ekle
-            'customerAdditionalId': self.customer_additional_id, # JSON çıktısına ekle
+            'customerSirenIpAddress': self.customer_siren_ip_address,
+            'customerAdditionalId': self.customer_additional_id,
+            'customerAddress': self.customer_address,
+            'customerAlarmCenterIp': self.customer_alarm_center_ip,
             'rtspUrls': self.rtsp_urls,
             'status': self.status,
             'requestDate': self.request_date,
             'approvalDate': self.approval_date
         }
-# --- END OF FILE models.py ---
