@@ -24,12 +24,15 @@ from io import BytesIO
 from sqlalchemy.orm import joinedload
 from datetime import datetime, timedelta, timezone
 import pytz
+from flask_socketio import SocketIO, emit, join_room, leave_room # <<< YENİ IMPORTLAR
 
 TR_TIMEZONE = pytz.timezone('Europe/Istanbul')
 app = Flask(__name__)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///alarm_merkezi.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@alarmmerkezi.com')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Alarm123!')
@@ -82,6 +85,18 @@ def compress_image(image: Image.Image, max_kb: int = 100) -> bytes:
         quality -= 5
 
     return buffer.getvalue()
+
+
+def send_alarm_notification_to_customer(customer_id, alarm_payload_json):
+    """
+    Belirli bir müşteriye yeni alarm bildirimini WebSocket üzerinden gönderir.
+    customer_id: Hedef müşteri ID'si.
+    alarm_payload_json: Alarmın JSON formatındaki verisi (Alarm.to_json() çıktısı gibi).
+    """
+    room_name = f"customer_{customer_id}"
+    print(f"Sending 'new_alarm' event to room {room_name} with data: {alarm_payload_json}")
+    socketio.emit('new_alarm', alarm_payload_json, room=room_name)
+    # socketio.emit('new_alarm', alarm_payload_json, to=room_name) # Eski versiyonlarda 'to' kullanılabilir
 
 @app.route("/upload", methods=["POST"])
 def upload_image():
@@ -418,8 +433,6 @@ def get_reseller_customer_alarms(reseller_id):
 @app.route('/alarms/test-create', methods=['POST'])
 def create_test_alarm():
     data = request.get_json()
-    # customer_id, camera_id, alarm_type vb. data'dan alınır.
-    # Örnek bir alarm:
     try:
         customer = Customer.query.get(data.get('customerId'))
         camera = Camera.query.get(data.get('cameraId'))
@@ -433,15 +446,56 @@ def create_test_alarm():
             category=data.get('category', 'Critical'),
             event_details=data.get('event', 'test_event'),
             module_name=data.get('module', 'Test_Module'),
-            timestamp=datetime.strptime(data.get('datetime'), '%d.%m.%Y %H:%M:%S') if data.get('datetime') else datetime.utcnow(),
+            timestamp=datetime.strptime(data.get('datetime'), '%d.%m.%Y %H:%M:%S') if data.get('datetime') else datetime.now(timezone.utc),
             image_url=data.get('imageUrl', 'https://images.pexels.com/photos/9875441/pexels-photo-9875441.jpeg')
         )
         db.session.add(new_alarm)
         db.session.commit()
-        return jsonify(new_alarm.to_json()), 201
+
+        # <<< YENİ: WebSocket üzerinden bildirim gönder >>>
+        alarm_json_payload = new_alarm.to_json() # Modelindeki to_json() metodu kullanılacak
+        send_alarm_notification_to_customer(new_alarm.customer_id, alarm_json_payload)
+
+        return jsonify(alarm_json_payload), 201
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Error creating test alarm", "details": str(e)}), 500
+
+@socketio.on('connect')
+def handle_user_connect():
+    # Bu kısım şimdilik boş kalabilir veya basit bir loglama yapılabilir.
+    # İstemci bağlandığında kimlik doğrulaması (JWT vb.) yapılıp,
+    # kullanıcı bir "session"a veya WebSocket context'ine eklenebilir.
+    # client_sid = request.sid # Her bağlantının benzersiz session ID'si
+    print(f"Client connected: {request.sid}")
+    # İstemci bağlandığında otomatik olarak bir odaya katılmaz.
+    # Frontend'den 'join_room' event'i bekleyeceğiz.
+
+@socketio.on('join_customer_room')
+def handle_join_customer_room(data):
+    # Frontend'den gelen 'customerId' bilgisi ile kullanıcıyı odaya al.
+    # Bu 'data' objesi { customerId: user.id } gibi bir şey olmalı.
+    customer_id = data.get('customerId')
+    # ÖNEMLİ: Burada customerId'nin gerçekten giriş yapmış kullanıcıya ait olup olmadığını
+    # bir token veya session ile doğrulamak GEREKİR. Güvenlik için şart!
+    # Şimdilik basit tutuyoruz.
+    if customer_id:
+        room_name = f"customer_{customer_id}"
+        join_room(room_name) # İstemciyi odaya ekle
+        print(f"Client {request.sid} joined room: {room_name}")
+        # İsteğe bağlı: Başarılı katılım mesajı geri gönderilebilir.
+        # emit('joined_room_ack', {'status': 'success', 'room': room_name}, room=request.sid)
+    else:
+        print(f"Client {request.sid} tried to join without customerId.")
+        # Hata mesajı gönderilebilir.
+        # emit('join_room_error', {'error': 'customerId not provided'}, room=request.sid)
+
+
+@socketio.on('disconnect')
+def handle_user_disconnect():
+    print(f"Client disconnected: {request.sid}")
+    # İstemci odalardan otomatik olarak çıkarılır, özel bir leave_room çağırmaya gerek yok.
+
 
 # --- MÜŞTERİ ENDPOINTS (Önceki haliyle korunuyor) ---
 
@@ -1446,5 +1500,6 @@ def toggle_customer_presence(id):
         return jsonify({"error": "Durum güncellenirken bir hata oluştu.", "details": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # app.run(debug=True, port=5000)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=True)
 # --- END OF FILE app.py ---
