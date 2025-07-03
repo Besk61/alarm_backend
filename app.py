@@ -88,6 +88,32 @@ UPLOAD_FOLDER = "cdn_images"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 MAX_FILE_SIZE_KB = 100 # Örnek 100KB limit
 
+@app.route('/customers/<int:customer_id>/cameras/indexed', methods=['GET'])
+def get_customer_cameras_with_sequential_indices(customer_id):
+    """
+    Belirli bir müşterinin TÜM kameralarını veritabanı ID'lerine göre sıralar
+    ve 1'den başlayan sıralı bir 'customer_camera_index' alanı ekleyerek döndürür.
+    """
+    # 1. Müşteriyi bul, bulunamazsa 404 hatası döndür.
+    customer = Customer.query.get_or_404(customer_id)
+
+    # 2. Müşterinin tüm kameralarını al ve veritabanındaki orijinal ID'lerine göre
+    #    küçükten büyüğe doğru sırala. Bu, her zaman tutarlı bir sıra elde etmemizi sağlar.
+    sorted_cameras = sorted(customer.cameras_rel, key=lambda cam: cam.id)
+
+    # 3. Sıralanmış kameralar listesi üzerinde dönerek yeni bir liste oluştur.
+    #    Her bir kameranın bilgisine 'customer_camera_index' alanını ekle.
+    indexed_cameras_list = []
+    for index, camera in enumerate(sorted_cameras, 1): # enumerate'e 1 vererek sayacı 1'den başlat
+        # Kameranın mevcut JSON verisini al
+        camera_data = camera.to_json()
+        # Yeni sıralı numaramızı ekle
+        camera_data['customer_camera_index'] = index
+        indexed_cameras_list.append(camera_data)
+
+    # 4. Yeni oluşturulan listeyi JSON olarak döndür.
+    return jsonify(indexed_cameras_list), 200
+
 
 def generate_verification_code(length=6):
     """Rastgele N haneli sayısal doğrulama kodu üretir."""
