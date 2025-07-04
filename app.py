@@ -1160,7 +1160,15 @@ def get_customer_cameras(customer_id):
     try:
         # Python'un sorted() fonksiyonu ile sıralama yapıyoruz
         # attrgetter, birden fazla özelliğe göre sıralamayı kolaylaştırır
-        sorted_cameras = sorted(customer.cameras_rel, key=attrgetter('assigned_module', 'name'))
+        sorted_cameras = sorted(
+            customer.cameras_rel, 
+            key=lambda cam: (
+                cam.assigned_module is None, # Önce modülü olmayanları grupla (ve sona at)
+                cam.assigned_module,         # Sonra modül adına göre sırala
+                cam.name is None,            # Sonra adı olmayanları grupla (ve sona at)
+                cam.name                     # Sonra kamera adına göre sırala
+            )
+        )
         return jsonify([camera.to_json() for camera in sorted_cameras]), 200
     except Exception as e:
         import traceback
