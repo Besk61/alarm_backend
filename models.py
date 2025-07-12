@@ -168,6 +168,7 @@ class Customer(db.Model):
     license_expiry = db.Column(db.String(20), nullable=False)
     status = db.Column(db.String(20), default='Active')
     
+    
     siren_ip_address = db.Column(db.String(50), nullable=True)
     additional_id = db.Column(db.String(100), nullable=True)
     address = db.Column(db.Text, nullable=True) 
@@ -177,8 +178,11 @@ class Customer(db.Model):
     
     # "Ben Buradayım" modunun bitiş zamanı. Veritabanında UTC olarak saklanır.
     is_present_until = db.Column(db.DateTime, nullable=True, default=None)
+    
+    onesignal_player_ids = db.Column(db.Text, nullable=True)
 
     reseller_id = db.Column(db.Integer, db.ForeignKey('reseller.id'), nullable=False)
+    
 
     cameras_rel = db.relationship('Camera', backref='customer', lazy='subquery', cascade="all, delete-orphan")
 
@@ -203,6 +207,13 @@ class Customer(db.Model):
         # --- İŞTE DÜZELTME BURADA ---
         present_until_iso = None
         # `self.is_present_until` None değilse localize işlemini yap.
+        player_ids = []
+        if self.onesignal_player_ids:
+            try:
+                player_ids = json.loads(self.onesignal_player_ids)
+            except json.JSONDecodeError:
+                player_ids = []
+
         if self.is_present_until:
             aware_utc_time = UTC_TIMEZONE.localize(self.is_present_until)
             present_until_iso = aware_utc_time.isoformat()
@@ -229,7 +240,8 @@ class Customer(db.Model):
             # `self.is_present` çağrısı artık `None` durumu için güvende.
             'is_present': self.is_present, 
             # `present_until_iso` da `None` durumu için güvende.
-            'is_present_until': present_until_iso
+            'is_present_until': present_until_iso,
+            'onesignal_player_ids': player_ids # YENİ
         }
 
 class Camera(db.Model):

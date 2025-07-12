@@ -24,6 +24,7 @@ import base64
 import os
 import random
 import string
+import requests
 # from PIL import Image # base64 decode için Pillow.Image'a gerek yok, BytesIO yeterli
 from io import BytesIO
 import pytz # Türkiye saati için
@@ -40,6 +41,8 @@ app.config['MAIL_USE_SSL'] = False           # TLS kullanıyorsan bu False olmal
 app.config['MAIL_USERNAME'] = 'zubatgo0@gmail.com' # Environment variable'dan oku
 app.config['MAIL_PASSWORD'] = str("dduemvskmsncrkqb") # Environment variable'dan oku
 app.config['MAIL_DEFAULT_SENDER'] = ('Alarm Merkezi Bildirim', 'zubatgo0@gmail.com') # Gönderen adı ve e-postası
+app.config['ONE_SIGNAL_APP_ID'] = os.environ.get('ONE_SIGNAL_APP_ID', '5f984948-efe9-4973-a697-a99374b9b491')
+app.config['ONE_SIGNAL_API_KEY'] = os.environ.get('ONE_SIGNAL_REST_API_KEY', 'os_v2_app_l6messhp5fexhjuxvgjxjonusgngnlj4767exqndajtwo6bgswmgsugvg2ht3q2w5e3txv3wlebou55y6dibzlwg6pro2fd66q45esy')
 
 
 
@@ -57,6 +60,8 @@ CORS(app) # Tüm domainlerden erişime izin verir, üretimde kısıtlanabilir
 
 
 mail = Mail(app) # Flask-Mail'i başlat (Yorumu kaldır)
+
+
 
 with app.app_context():
     db.create_all()
@@ -114,6 +119,100 @@ def get_customer_cameras_with_sequential_indices(customer_id):
     # 4. Yeni oluşturulan listeyi JSON olarak döndür.
     return jsonify(indexed_cameras_list), 200
 
+
+@app.route('/customers/<int:customer_id>/save-player-id', methods=['POST'])
+def save_player_id(customer_id):
+    # Gerçek uygulamada bu customer_id'nin giriş yapan kullanıcıya ait olduğu
+    # bir JWT veya session ile doğrulanmalıdır.
+    customer = Customer.query.get_or_404(customer_id)
+    data = request.get_json()
+    
+    player_id = data.get('player_id')
+    if not player_id:
+        return jsonify({"error": "player_id eksik."}), 400
+
+    # Mevcut ID'leri yükle
+    existing_ids = []
+    if customer.onesignal_player_ids:
+        try:
+            existing_ids = json.loads(customer.onesignal_player_ids)
+        except json.JSONDecodeError:
+            existing_ids = []
+            
+    # Yeni ID zaten listede yoksa ekle
+    if player_id not in existing_ids:
+        existing_ids.append(player_id)
+        customer.onesignal_player_ids = json.dumps(existing_ids)
+        
+        try:
+            db.session.commit()
+            return jsonify({"message": "Player ID başarıyla kaydedildi.", "player_ids": existing_ids}), 200
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": "Veritabanına kaydederken hata oluştu.", "details": str(e)}), 500
+    
+    return jsonify({"message": "Bu Player ID zaten kayıtlı.", "player_ids": existing_ids}), 200
+
+def send_onesignal_notification(player_ids, heading, content, data=None, image_url=None):
+    """
+    Belirtilen Player ID'lere OneSignal üzerinden anlık bildirim gönderir.
+    
+    :param player_ids: Bildirim gönderilecek cihazların ID listesi.
+    :param heading: Bildirimin başlığı.
+    :param content: Bildirimin içeriği.
+    :param data: Bildirimle birlikte gönderilecek ek veri (örn: {'alarm_id': 123}).
+    :param image_url: Bildirimde gösterilecek büyük resim URL'si.
+    """
+    if not player_ids or not isinstance(player_ids, list):
+        print("[OneSignal] Hata: Geçerli player_ids listesi sağlanmadı.")
+        return
+
+    onesignal_app_id = app.config.get('ONE_SIGNAL_APP_ID')
+    onesignal_api_key = app.config.get('ONE_SIGNAL_API_KEY')
+    
+    if not onesignal_app_id or not onesignal_api_key or 'YOUR_ONESIGNAL' in onesignal_app_id:
+        print("[OneSignal] Hata: OneSignal APP ID veya API Key yapılandırılmamış.")
+        return
+
+    headers = {
+        "accept": "application/json",
+        "Authorization": f"Basic {onesignal_api_key}",
+        "content-type": "application/json"
+    }
+    
+    payload = {
+        "app_id": onesignal_app_id,
+        "include_player_ids": player_ids,
+        "headings": {"en": heading}, # Birden fazla dil desteklenebilir
+        "contents": {"en": content}
+    }
+
+    # Eğer ek veri varsa payload'a ekle
+    if data and isinstance(data, dict):
+        payload['data'] = data
+        # Web push için, tıklandığında gidilecek URL'yi de ayarlayabiliriz.
+        # Örneğin alarm detay sayfasına yönlendirme.
+        if 'alarm_id' in data:
+            payload['web_url'] = f"https://alarmmerkezibackend.online/alarms/{data['alarm_id']}"
+            
+    # Eğer resim URL'si varsa, büyük resim olarak ekle
+    if image_url:
+        payload['big_picture'] = image_url
+        # iOS için de ekleyelim
+        payload['ios_attachments'] = {"id1": image_url}
+
+    try:
+        response = requests.post(
+            "https://onesignal.com/api/v1/notifications", 
+            headers=headers, 
+            json=payload
+        )
+        response.raise_for_status() # HTTP 2xx dışında bir kod varsa hata fırlatır
+        print(f"[OneSignal] Bildirim başarıyla gönderildi. Yanıt: {response.json()}")
+    except requests.exceptions.RequestException as e:
+        print(f"[OneSignal] Bildirim gönderilirken HATA oluştu: {e}")
+        if e.response:
+            print(f"[OneSignal] Hata Detayı: {e.response.text}")
 
 def generate_verification_code(length=6):
     """Rastgele N haneli sayısal doğrulama kodu üretir."""
@@ -441,6 +540,28 @@ def create_test_alarm():
 
         db.session.add(new_alarm)
         db.session.commit()
+
+        if customer.onesignal_player_ids:
+            try:
+                player_ids = json.loads(customer.onesignal_player_ids)
+                if player_ids:
+                    baslik = f"🚨 {new_alarm.alarm_type}!"
+                    icerik = f"{customer.name} adlı müşterinin {camera.name} kamerasında bir alarm tetiklendi."
+                    
+                    # Bildirime tıklanınca alarm detayını açabilmek için veri gönderelim
+                    alarm_data = {"alarm_id": new_alarm.id, "type": "alarm_notification"}
+
+                    # Yardımcı fonksiyonu çağır
+                    send_onesignal_notification(
+                        player_ids=player_ids,
+                        heading=baslik,
+                        content=icerik,
+                        data=alarm_data,
+                        image_url=new_alarm.image_url # Alarm resmini de gönderelim
+                    )
+            except (json.JSONDecodeError, TypeError) as e:
+                print(f"[OneSignal] Müşteri {customer.id} için player_id'ler okunamadı: {e}")
+
         return jsonify(new_alarm.to_json()), 201
     except Exception as e:
         db.session.rollback()
