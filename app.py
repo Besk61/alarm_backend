@@ -122,36 +122,45 @@ def get_customer_cameras_with_sequential_indices(customer_id):
 
 @app.route('/customers/<int:customer_id>/save-player-id', methods=['POST'])
 def save_player_id(customer_id):
-    # Gerçek uygulamada bu customer_id'nin giriş yapan kullanıcıya ait olduğu
-    # bir JWT veya session ile doğrulanmalıdır.
     customer = Customer.query.get_or_404(customer_id)
     data = request.get_json()
-    
+
     player_id = data.get('player_id')
     if not player_id:
         return jsonify({"error": "player_id eksik."}), 400
 
-    # Mevcut ID'leri yükle
-    existing_ids = []
-    if customer.onesignal_player_ids:
-        try:
-            existing_ids = json.loads(customer.onesignal_player_ids)
-        except json.JSONDecodeError:
-            existing_ids = []
-            
-    # Yeni ID zaten listede yoksa ekle
-    if player_id not in existing_ids:
-        existing_ids.append(player_id)
-        customer.onesignal_player_ids = json.dumps(existing_ids)
-        
-        try:
-            db.session.commit()
-            return jsonify({"message": "Player ID başarıyla kaydedildi.", "player_ids": existing_ids}), 200
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({"error": "Veritabanına kaydederken hata oluştu.", "details": str(e)}), 500
-    
-    return jsonify({"message": "Bu Player ID zaten kayıtlı.", "player_ids": existing_ids}), 200
+    try:
+        # Tüm kullanıcıları çek
+        all_customers = Customer.query.all()
+        for c in all_customers:
+            if c.id != customer.id and c.onesignal_player_ids:
+                try:
+                    ids = json.loads(c.onesignal_player_ids)
+                    if player_id in ids:
+                        ids.remove(player_id)
+                        c.onesignal_player_ids = json.dumps(ids)
+                except json.JSONDecodeError:
+                    continue  # Bozuk JSON varsa geç
+
+        # Şimdi mevcut kullanıcıya ekle
+        existing_ids = []
+        if customer.onesignal_player_ids:
+            try:
+                existing_ids = json.loads(customer.onesignal_player_ids)
+            except json.JSONDecodeError:
+                existing_ids = []
+
+        if player_id not in existing_ids:
+            existing_ids.append(player_id)
+            customer.onesignal_player_ids = json.dumps(existing_ids)
+
+        db.session.commit()
+        return jsonify({"message": "Player ID başarıyla güncellendi.", "player_ids": existing_ids}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Veritabanında hata oluştu.", "details": str(e)}), 500
+
 
 def send_onesignal_notification(player_ids, heading, content, data=None, image_url=None):
     """
