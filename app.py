@@ -8,9 +8,10 @@ from operator import attrgetter # Bunu importların en başına ekle
 # models.py içinden AVAILABLE_MODULES ve MODULE_KEYS'in de import edildiğini varsayıyoruz.
 # Eğer models.py'de bu tanımlar yoksa, ya oraya ekleyin ya da buraya manuel kopyalayın.
 from models import (
-    Alarm, db, Reseller, Customer, Camera, ApprovalRequest,
+    Alarm, db, Reseller, Customer, Camera, ApprovalRequest,ActiveNotification,
     AVAILABLE_MODULES, MODULE_KEYS # Bu satır önemli!
 )
+
 from datetime import datetime, timedelta, timezone # datetime.timezone UTC için
 from werkzeug.security import check_password_hash, generate_password_hash
 from sqlalchemy import func, extract, Date, cast
@@ -88,6 +89,89 @@ with app.app_context():
         print(f"Test Bayisi '{test_reseller.name}' başarıyla oluşturuldu. Modül lisansları: {test_reseller.module_licenses}")
 
 # === API Endpoint'leri ===
+
+
+@app.route('/api/notifications/push', methods=['POST'])
+def push_notification():
+    """
+    Yeni bir bildirimi sisteme (veritabanına) ekler.
+    Artık bildirimler doğrudan buraya gönderilecek.
+    """
+    data = request.get_json()
+    if not data or 'info' not in data or 'accountNo' not in data['info']:
+        return jsonify({"error": "Geçersiz veri. 'info' ve 'info.accountNo' alanları zorunludur."}), 400
+
+    info = data['info']
+    account_no = info['accountNo']
+    customer_name = info.get('Müşteri Adı', 'Bilinmeyen Müşteri')
+    image_b64 = data.get('imageDataB64') # Resim base64 olarak bekleniyor
+
+    try:
+        new_notif = ActiveNotification(
+            account_no=account_no,
+            customer_name=customer_name,
+            full_info_json=json.dumps(info),
+            image_data_b64=image_b64
+        )
+        db.session.add(new_notif)
+        db.session.commit()
+        return jsonify({"message": "Bildirim başarıyla eklendi", "id": new_notif.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Bildirim kaydedilirken veritabanı hatası.", "details": str(e)}), 500
+
+@app.route('/api/notifications/active', methods=['GET'])
+def get_active_notifications():
+    """
+    Tüm aktif (okunmamış) bildirimleri, masaüstü uygulamasının anlayacağı formatta gruplayarak döndürür.
+    """
+    try:
+        notifications = ActiveNotification.query.order_by(ActiveNotification.timestamp.desc()).all()
+        
+        # Bildirimleri account_no'ya göre gruplayalım
+        grouped_notifications = defaultdict(list)
+        for notif in notifications:
+            grouped_notifications[notif.account_no].append(notif.to_json())
+
+        # Masaüstü uygulamasının işini kolaylaştırmak için listeye çevirelim
+        response_data = []
+        for account_no, notif_list in grouped_notifications.items():
+            # Her grubun en son bildirimini ana bilgi olarak alalım
+            latest_notif = notif_list[0] 
+            response_data.append({
+                'accountNo': account_no,
+                'notificationCount': len(notif_list),
+                'latestTimestamp': latest_notif['timestamp'],
+                'notifications': notif_list # Gruptaki tüm bildirimlerin detayları
+            })
+        
+        # En yeni gruba göre sırala
+        response_data.sort(key=lambda x: x['latestTimestamp'], reverse=True)
+
+        return jsonify(response_data), 200
+    except Exception as e:
+        return jsonify({"error": "Aktif bildirimler alınırken hata.", "details": str(e)}), 500
+
+@app.route('/api/notifications/dismiss/<string:account_no>', methods=['DELETE'])
+def dismiss_notification_group(account_no):
+    """
+    Belirli bir 'account_no'ya sahip tüm aktif bildirimleri siler.
+    """
+    if not account_no:
+        return jsonify({"error": "account_no gereklidir"}), 400
+    try:
+        # Belirtilen account_no'ya ait tüm kayıtları bul ve sil
+        num_deleted = ActiveNotification.query.filter_by(account_no=account_no).delete()
+        db.session.commit()
+        
+        if num_deleted > 0:
+            return jsonify({"message": f"{account_no} hesabına ait {num_deleted} bildirim temizlendi."}), 200
+        else:
+            return jsonify({"message": "Temizlenecek bildirim bulunamadı."}), 404
+            
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Bildirimler silinirken veritabanı hatası.", "details": str(e)}), 500
 
 UPLOAD_FOLDER = "cdn_images"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)

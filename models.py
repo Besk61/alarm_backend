@@ -273,6 +273,35 @@ class Camera(db.Model):
             "confidence_threshold": self.confidence_threshold
         }
 
+class ActiveNotification(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    account_no = db.Column(db.String(100), nullable=False, index=True) # Gruplama için anahtar
+    customer_name = db.Column(db.String(100), nullable=False)
+    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(UTC_TIMEZONE), nullable=False)
+    
+    # Tüm bildirim detaylarını (Tarih, Kamera ID, Adres vb.) JSON olarak saklayalım. Bu çok esnektir.
+    full_info_json = db.Column(db.Text, nullable=False)
+    
+    # Resmi Base64 string olarak saklayacağız.
+    image_data_b64 = db.Column(db.Text, nullable=True)
+
+    def to_json(self):
+        # JSON string'ini tekrar Python dict'ine çevirerek gönderiyoruz.
+        try:
+            info_dict = json.loads(self.full_info_json)
+        except (json.JSONDecodeError, TypeError):
+            info_dict = {}
+
+        return {
+            'id': self.id,
+            'accountNo': self.account_no,
+            'customerName': self.customer_name,
+            'timestamp': self.timestamp.isoformat(),
+            'info': info_dict,
+            'imageDataB64': self.image_data_b64
+        }
+
+
 class ApprovalRequest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     reseller_id = db.Column(db.Integer, db.ForeignKey('reseller.id'), nullable=False)
